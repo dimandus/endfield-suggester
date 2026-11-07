@@ -75,7 +75,31 @@ const DEFAULT_TAGS: &str = "\
 Реакция искусств\r\n\
 Щит\r\n";
 
-fn resolve_data_dir() -> Result<PathBuf, String> {
+fn seed_missing(src: &Path, dst: &Path) -> Result<(), String> {
+    if !src.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let to = dst.join(entry.file_name());
+        if entry.path().is_dir() {
+            seed_missing(&entry.path(), &to)?;
+        } else if !to.exists() {
+            fs::copy(entry.path(), to).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn bundled_data_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    [resource_dir.join("data"), resource_dir]
+        .into_iter()
+        .find(|path| path.join("operators").is_dir())
+}
+
+fn resolve_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     if cfg!(debug_assertions) {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let root = manifest
@@ -88,7 +112,24 @@ fn resolve_data_dir() -> Result<PathBuf, String> {
     let exe_dir = exe
         .parent()
         .ok_or_else(|| "Не удалось найти папку программы".to_string())?;
-    Ok(exe_dir.join("data"))
+    let portable = exe_dir.join("data");
+    if portable.join("operators").is_dir() {
+        if let Some(bundled) = bundled_data_dir(app) {
+            seed_missing(&bundled, &portable)?;
+        }
+        return Ok(portable);
+    }
+
+    let dest = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("data");
+    if let Some(bundled) = bundled_data_dir(app) {
+        seed_missing(&bundled, &dest)?;
+    }
+    ensure_data_layout(&dest)?;
+    Ok(dest)
 }
 
 fn first_file(dir: &Path, names: &[&str]) -> Option<PathBuf> {
@@ -283,7 +324,7 @@ fn write_info(folder: &Path, info: &Value) -> Result<(), String> {
 
 #[tauri::command]
 fn load_library(app: tauri::AppHandle) -> Result<Library, String> {
-    let data_dir = resolve_data_dir()?;
+    let data_dir = resolve_data_dir(&app)?;
     ensure_data_layout(&data_dir)?;
     app.asset_protocol_scope()
         .allow_directory(&data_dir, true)
@@ -298,8 +339,8 @@ fn load_library(app: tauri::AppHandle) -> Result<Library, String> {
 }
 
 #[tauri::command]
-fn open_tags_file() -> Result<String, String> {
-    let data_dir = resolve_data_dir()?;
+fn open_tags_file(app: tauri::AppHandle) -> Result<String, String> {
+    let data_dir = resolve_data_dir(&app)?;
     ensure_data_layout(&data_dir)?;
     let path = tags_path(&data_dir);
 
@@ -323,8 +364,8 @@ fn open_tags_file() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn open_data_dir() -> Result<String, String> {
-    let data_dir = resolve_data_dir()?;
+fn open_data_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let data_dir = resolve_data_dir(&app)?;
     ensure_data_layout(&data_dir)?;
 
     #[cfg(target_os = "windows")]
@@ -347,9 +388,9 @@ fn open_data_dir() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn save_entity(kind: String, id: Option<String>, info: Value) -> Result<String, String> {
+fn save_entity(app: tauri::AppHandle, kind: String, id: Option<String>, info: Value) -> Result<String, String> {
     let kind = kind_dir_name(&kind)?;
-    let data_dir = resolve_data_dir()?;
+    let data_dir = resolve_data_dir(&app)?;
     ensure_data_layout(&data_dir)?;
     let kind_dir = data_dir.join(kind);
     let name = info
@@ -379,10 +420,10 @@ fn save_entity(kind: String, id: Option<String>, info: Value) -> Result<String, 
 }
 
 #[tauri::command]
-fn delete_entity(kind: String, id: String) -> Result<(), String> {
+fn delete_entity(app: tauri::AppHandle, kind: String, id: String) -> Result<(), String> {
     let kind = kind_dir_name(&kind)?;
     let id = folder_id(&id)?;
-    let folder = resolve_data_dir()?.join(kind).join(id);
+    let folder = resolve_data_dir(&app)?.join(kind).join(id);
     if !folder.is_dir() {
         return Err("Папка не найдена".into());
     }
@@ -394,7 +435,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            if let Ok(data_dir) = resolve_data_dir() {
+            if let Ok(data_dir) = resolve_data_dir(app.handle()) {
                 let _ = ensure_data_layout(&data_dir);
                 let _ = app.asset_protocol_scope().allow_directory(&data_dir, true);
             }
