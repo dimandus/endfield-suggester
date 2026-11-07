@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://endfield.local/schema/weapon.json",
+  "title": "Weapon",
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": true,
+  "properties": {
+    "name": { "type": "string" },
+    "rarity": { "enum": [3, 4, 5, 6] },
+    "type": {
+      "enum": ["Меч", "Модуль искусств", "Двуручный меч", "Древковое оружие", "Пушка"]
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

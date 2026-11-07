@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://endfield.local/schema/operator.json",
+  "title": "Operator",
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": true,
+  "properties": {
+    "name": { "type": "string" },
+    "owned": { "type": "boolean" },
+    "rarity": { "enum": [3, 4, 5, 6] },
+    "class": {
+      "enum": ["Страж", "Заклинатель", "Штурмовик", "Авангард", "Защитник", "Поддержка"]
+    },
+    "element": {
+      "enum": ["Физика", "Тепло", "Природа", "Электро", "Крио", "Эфир"]
+    },
+    "weaponType": {
+      "enum": ["Меч", "Модуль искусств", "Двуручный меч", "Древковое оружие", "Пушка"]
+    },
+    "stats": {
+      "type": "object",
+      "required": ["primary", "secondary"],
+      "properties": {
+        "primary": {
+          "enum": ["strength", "agility", "intellect", "will"]
+        },
+        "secondary": {
+          "enum": ["strength", "agility", "intellect", "will"]
+        }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "comboFrom": {
+            "description": "Замок комбонавыка: событие, от которого он вспыхивает.",
+            "type": "array",
+            "items": { "$ref": "#/$defs/triggerId" }
+          },
+          "comboFromMatch": {
+            "description": "all — все условия сразу (по умолчанию). any — достаточно одного.",
+            "enum": ["all", "any"]
+          },
+          "needs": {
+            "description": "Что навык ждёт в пачке, чтобы сработала усиленная ветка. Не то, что он сам вешает (это tags).",
+            "type": "array",
+            "items": { "$ref": "#/$defs/triggerId" }
+          },
+          "needsMatch": {
+            "description": "all — все условия сразу (по умолчанию). any — достаточно одного.",
+            "enum": ["all", "any"]
+          },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "damage": {
+            "type": "array",
+            "description": "Стихии удара навыка. Канон оперативника — поле element на корне. Несколько записей — разные такты или ветки. when пустой: удар всегда этой стихии.",
+            "items": {
+              "type": "object",
+              "required": ["element"],
+              "additionalProperties": false,
+              "properties": {
+                "element": {
+                  "enum": ["Физика", "Тепло", "Природа", "Электро", "Крио", "Эфир"]
+                },
+                "when": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "triggerId": {
+      "enum": [
+        "final-strike",
+        "arts-infliction",
+        "arts-reaction",
+        "electrification",
+        "combustion",
+        "solidification",
+        "corrosion",
+        "physical-status",
+        "vulnerable-stacks",
+        "crush-or-breach",
+        "stagger",
+        "cryo-infliction",
+        "nature-infliction",
+        "electric-infliction",
+        "ally-combo",
+        "ally-pressure",
+        "heal-spent"
+      ]
+    }
+  }
+}
