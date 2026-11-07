@@ -103,10 +103,75 @@ function namedWith(members: Entity[], list: readonly string[]) {
   return members.filter((member) => hasAny(operatorTags(member), list)).map(displayName);
 }
 
+function comboWantsOf(member: Entity) {
+  return normalizeComboFrom(comboSkill(member)?.comboFrom);
+}
+
+function needsWantsOf(member: Entity) {
+  return (member.info.skills ?? []).flatMap((skill) => normalizeComboFrom(skill.needs));
+}
+
 function lockedTriggerIds(member: Entity): string[] {
-  const fromCombo = normalizeComboFrom(comboSkill(member)?.comboFrom);
-  const fromNeeds = (member.info.skills ?? []).flatMap((skill) => normalizeComboFrom(skill.needs));
-  return [...fromCombo, ...fromNeeds];
+  return [...comboWantsOf(member), ...needsWantsOf(member)];
+}
+
+function artsInflictProvided(entity: Entity, slotOne?: Entity | null) {
+  if (entity.id === "si") {
+    const heatCarry = Boolean(slotOne && isMainDps(slotOne) && slotOne.info.element === "Тепло");
+    return heatCarry ? ["Поражение теплом"] : ["Криогенное поражение"];
+  }
+  return ARTS_INFLICT.filter((tag) => operatorTags(entity).has(tag));
+}
+
+const ARTS_COMBO_IDS = new Set([
+  "arts-reaction",
+  "arts-infliction",
+  "electrification",
+  "combustion",
+  "solidification",
+  "corrosion",
+  "cryo-infliction",
+  "nature-infliction",
+  "electric-infliction",
+]);
+
+function hasArtsIdentity(entity: Entity) {
+  const tags = operatorTags(entity);
+  if (artsInflictProvided(entity).length) return true;
+  if (
+    hasAny(tags, [
+      "Электризация",
+      "Возгорание",
+      "Застывание",
+      "Коррозия",
+      "Тепловзрыв",
+      "Электровзрыв",
+      "Криовзрыв",
+      "Природный взрыв",
+    ])
+  ) {
+    return true;
+  }
+  return comboWantsOf(entity).some((id) => ARTS_COMBO_IDS.has(id));
+}
+
+function isArtsLiftSupport(entity: Entity) {
+  const combo = comboWantsOf(entity);
+  return (
+    entity.info.class === "Поддержка" &&
+    hasAny(operatorTags(entity), PHYSICAL_APPLY) &&
+    (combo.includes("arts-reaction") || combo.includes("arts-infliction"))
+  );
+}
+
+function isCrushApplier(entity: Entity) {
+  if (!hasAny(operatorTags(entity), PHYSICAL_APPLY)) return false;
+  if (isArtsLiftSupport(entity)) return false;
+  return true;
+}
+
+function isCrushConsumer(entity: Entity) {
+  return hasAny(operatorTags(entity), PHYSICAL_CONSUME);
 }
 
 function focusTouches(focus: Entity[], people: Entity[]) {
@@ -119,7 +184,7 @@ export function isMainDps(entity: Entity) {
   const cls = entity.info.class;
   const rarity = entity.info.rarity ?? 0;
   if (cls === "Штурмовик") return true;
-  if (cls === "Страж" && rarity >= 5) return true;
+  if (cls === "Страж" && rarity >= 6) return true;
   if (cls === "Заклинатель" && rarity >= 6) return true;
   return false;
 }
@@ -134,7 +199,8 @@ function spTagCount(entity: Entity) {
 
 function isSpBattery(entity: Entity) {
   if (entity.info.class === "Авангард") return true;
-  return spTagCount(entity) >= 2;
+  if (spTagCount(entity) >= 2) return true;
+  return entity.info.class === "Заклинатель" && (entity.info.rarity ?? 0) >= 6 && spTagCount(entity) >= 1;
 }
 
 function isPureStacker(entity: Entity) {
@@ -145,9 +211,9 @@ function isPureStacker(entity: Entity) {
 }
 
 function focusWantsCrush(focus: Entity[]) {
-  if (!focus.length) return true;
+  if (!focus.length) return false;
   return focus.some((member) => {
-    const ids = lockedTriggerIds(member);
+    const ids = comboWantsOf(member);
     return (
       ids.includes("vulnerable-stacks") ||
       ids.includes("crush-or-breach") ||
@@ -171,14 +237,26 @@ function consumeNeedsOf(entity: Entity) {
   );
 }
 
-export function detectArchetype(members: Entity[], focus: Entity[] = []): TeamArchetype {
-  const appliers = members.filter((member) => hasAny(operatorTags(member), PHYSICAL_APPLY));
-  const consumers = members.filter((member) => hasAny(operatorTags(member), PHYSICAL_CONSUME));
+export function detectArchetype(
+  members: Entity[],
+  focus: Entity[] = [],
+  slotOne?: Entity | null,
+): TeamArchetype {
+  const appliers = members.filter(isCrushApplier);
+  const consumers = members.filter(isCrushConsumer);
   const split = appliers.some((applier) => consumers.some((consumer) => consumer.id !== applier.id));
-  const electric = members.filter((member) => operatorTags(member).has("Поражение электричеством")).length;
-  const heat = members.filter((member) => operatorTags(member).has("Поражение теплом")).length;
-  const nature = members.filter((member) => operatorTags(member).has("Поражение природой")).length;
-  const cryo = members.filter((member) => operatorTags(member).has("Криогенное поражение")).length;
+  const electric = members.filter((member) =>
+    artsInflictProvided(member, slotOne).includes("Поражение электричеством"),
+  ).length;
+  const heat = members.filter((member) =>
+    artsInflictProvided(member, slotOne).includes("Поражение теплом"),
+  ).length;
+  const nature = members.filter((member) =>
+    artsInflictProvided(member, slotOne).includes("Поражение природой"),
+  ).length;
+  const cryo = members.filter((member) =>
+    artsInflictProvided(member, slotOne).includes("Криогенное поражение"),
+  ).length;
   const crush = (split ? 2 : 0) + (members.some(isSpBattery) ? 1 : 0);
   const scores: { id: TeamArchetypeId; label: string; n: number }[] = [
     { id: "crush", label: "Физическое ядро (уязвимость → разгром/прорыв)", n: crush },
@@ -187,12 +265,38 @@ export function detectArchetype(members: Entity[], focus: Entity[] = []): TeamAr
     { id: "nature", label: "Природное ядро", n: nature },
     { id: "cryo", label: "Крио-ядро", n: cryo },
   ];
-  const wants = new Set(focus.flatMap(lockedTriggerIds));
-  if (wants.has("vulnerable-stacks") || wants.has("crush-or-breach")) scores[0].n += 1;
-  if (wants.has("electric-infliction") || wants.has("electrification")) scores[1].n += 1;
-  if (wants.has("combustion")) scores[2].n += 1;
-  if (wants.has("corrosion") || wants.has("nature-infliction")) scores[3].n += 1;
-  if (wants.has("solidification") || wants.has("cryo-infliction")) scores[4].n += 1;
+  const comboWants = new Set(focus.flatMap(comboWantsOf));
+  const needWants = new Set(focus.flatMap(needsWantsOf));
+  if (
+    (comboWants.has("vulnerable-stacks") || comboWants.has("crush-or-breach")) &&
+    !focus.some((member) => hasArtsIdentity(member) && !isCrushConsumer(member))
+  ) {
+    scores[0].n += 1;
+  }
+  if (comboWants.has("electric-infliction") || comboWants.has("electrification") || needWants.has("electric-infliction")) {
+    scores[1].n += 2;
+  }
+  if (comboWants.has("combustion")) scores[2].n += 1;
+  if (comboWants.has("corrosion") || comboWants.has("nature-infliction") || needWants.has("nature-infliction")) {
+    scores[3].n += 2;
+  }
+  if (
+    comboWants.has("solidification") ||
+    comboWants.has("cryo-infliction") ||
+    needWants.has("solidification") ||
+    needWants.has("cryo-infliction") ||
+    focus.some((member) => operatorTags(member).has("Застывание"))
+  ) {
+    scores[4].n += 2;
+  }
+  for (const member of focus) {
+    for (const tag of artsInflictProvided(member, slotOne)) {
+      if (tag === "Поражение электричеством") scores[1].n += 1;
+      if (tag === "Поражение теплом") scores[2].n += 1;
+      if (tag === "Поражение природой") scores[3].n += 1;
+      if (tag === "Криогенное поражение") scores[4].n += 1;
+    }
+  }
   scores.sort((a, b) => b.n - a.n);
   const best = scores[0];
   const second = scores[1];
@@ -264,15 +368,19 @@ export function scoreFormation(members: Entity[], focus: Entity[] = []) {
       notes.push("Два SP-генератора сразу — лишний слот.");
     }
   }
-  const appliers = members.filter((member) => hasAny(operatorTags(member), PHYSICAL_APPLY));
-  const consumers = members.filter((member) => hasAny(operatorTags(member), PHYSICAL_CONSUME));
+  const appliers = members.filter(isCrushApplier);
+  const consumers = members.filter(isCrushConsumer);
   const physicalCore =
     sp.length > 0 &&
     appliers.some((applier) => consumers.some((consumer) => consumer.id !== applier.id));
+  if (carry.length >= 3) {
+    score -= 22;
+    notes.push("Три главных ДД сразу — роли дублируются.");
+  }
   if (support.length) {
     score += 5;
     notes.push(`Поддержка: ${support.map(displayName).join(", ")}.`);
-  } else if (physicalCore && focusWantsCrush(focus)) {
+  } else if (physicalCore && focusWantsCrush(focus) && !focus.some(hasArtsIdentity)) {
     score += 5;
     notes.push("Физическое ядро (накопитель + разгром/прорыв + SP) вместо отдельной поддержки.");
     if (
@@ -293,7 +401,6 @@ export function scoreFormation(members: Entity[], focus: Entity[] = []) {
 }
 
 export function scoreTeam(members: Entity[], focus: Entity[] = [], options: ScoreOptions = {}): TeamScore {
-  const tags = members.map(operatorTags);
   const scoredTags = members.map(synergyTags);
   const elements = members.map((member) => member.info.element ?? "");
   const hits = members.map((member) => new Set(operatorHitElements(member)));
@@ -316,26 +423,27 @@ export function scoreTeam(members: Entity[], focus: Entity[] = [], options: Scor
     }
   }
 
-  const appliers = members.filter((member) => hasAny(operatorTags(member), PHYSICAL_APPLY));
-  const consumers = members.filter((member) => hasAny(operatorTags(member), PHYSICAL_CONSUME));
+  const appliers = members.filter(isCrushApplier);
+  const consumers = members.filter(isCrushConsumer);
   const splitPipeline = appliers.some((applier) =>
     consumers.some((consumer) => consumer.id !== applier.id),
   );
+  const comboWants = new Set(focus.flatMap(comboWantsOf));
   const lockedWants = new Set(focus.flatMap(lockedTriggerIds));
+  const slotOne = options.slotOne ?? members[0];
 
   let pipeline = 0;
   if (splitPipeline && focusTouches(focus, [...appliers, ...consumers])) pipeline += 6;
   if (
     focus.length &&
-    (lockedWants.has("vulnerable-stacks") || lockedWants.has("crush-or-breach"))
+    (comboWants.has("vulnerable-stacks") || comboWants.has("crush-or-breach")) &&
+    !focus.some((member) => hasArtsIdentity(member) && !isCrushConsumer(member))
   ) {
     if (appliers.some((member) => !focusIds.has(member.id))) pipeline += 8;
     if (consumers.some((member) => !focusIds.has(member.id))) pipeline += 8;
   }
-  const artsKinds = new Set(
-    tags.flatMap((set) => ARTS_INFLICT.filter((tag) => set.has(tag))),
-  );
-  if (artsKinds.size >= 2 && (!focus.length || lockedWants.has("arts-reaction"))) pipeline += 4;
+  const artsKinds = new Set(members.flatMap((member) => artsInflictProvided(member, slotOne)));
+  if (artsKinds.size >= 2 && (!focus.length || comboWants.has("arts-reaction"))) pipeline += 4;
   const cryoPeople = members.filter(
     (member) => hasAny(operatorTags(member), CRYO_SETUP) || operatorTags(member).has("Криогенное поражение"),
   );
@@ -356,29 +464,71 @@ export function scoreTeam(members: Entity[], focus: Entity[] = [], options: Scor
   const fillerNeeds = needsScore(members, { ...fromOthers, targets: others });
   let strict = 0;
   let battery = 0;
-  const crushCore = splitPipeline && members.some(isPureStacker);
+  const crushCore =
+    splitPipeline &&
+    members.some(isPureStacker) &&
+    focusWantsCrush(focus) &&
+    !focus.some((member) => hasArtsIdentity(member) && !isCrushConsumer(member));
+  const wantsSolidify = [...comboWants, ...lockedWants].some(
+    (id) => id === "solidification" || id === "cryo-infliction" || id === "nature-infliction",
+  ) || focus.some((member) => operatorTags(member).has("Застывание"));
   for (const member of focus) {
     const providers = members.filter((item) => item.id !== member.id);
-    for (const id of normalizeComboFrom(comboSkill(member)?.comboFrom)) {
-      if (hasStrictComboProvider(id, providers)) strict += 4;
+    const selfTags = operatorTags(member);
+    for (const id of comboWantsOf(member)) {
+      if (!hasStrictComboProvider(id, providers)) continue;
+      if (id === "solidification" && selfTags.has("Застывание")) continue;
+      if (id === "electrification" && selfTags.has("Электризация")) continue;
+      if (id === "combustion" && selfTags.has("Возгорание")) continue;
+      if (id === "corrosion" && selfTags.has("Коррозия")) continue;
+      strict += 4;
     }
     const hits = new Set(operatorHitElements(member));
-    const wantedArts = wantedInflictTags(member, options.slotOne);
+    const wantedArts = wantedInflictTags(member, slotOne);
     const lockedConsume = consumeNeedsOf(member);
+    const comboIds = comboWantsOf(member);
+    const wantsStacks = comboIds.includes("vulnerable-stacks") || comboIds.includes("physical-status");
+    const wantsArtsInflict = comboIds.includes("arts-infliction") || comboIds.includes("arts-reaction");
     for (const other of providers) {
       const tags = operatorTags(other);
-      const matchingArts = wantedArts.filter((tag) => tags.has(tag));
-      const otherArts = ARTS_INFLICT.filter((tag) => tags.has(tag));
+      const otherArts = artsInflictProvided(other, slotOne);
+      const matchingArts = wantedArts.filter((tag) => otherArts.includes(tag));
       const artsWeight = crushCore && !lockedWants.has("arts-infliction") ? 1 : 3;
-      if (lockedWants.has("arts-infliction")) {
-        if (matchingArts.length) battery += 6;
-        else if (otherArts.length) battery += 2;
+      if (lockedWants.has("arts-infliction") || wantsArtsInflict) {
+        const selfArts = artsInflictProvided(member, slotOne);
+        const complementary = otherArts.filter((tag) => !selfArts.includes(tag));
+        if (comboIds.includes("arts-reaction")) {
+          battery += complementary.length ? 10 : matchingArts.length ? 2 : 0;
+        } else if (matchingArts.length || otherArts.length) {
+          battery += matchingArts.length ? 10 : 4;
+          if (
+            matchingArts.includes("Поражение теплом") &&
+            other.info.class === "Авангард" &&
+            (other.info.rarity ?? 0) >= 6
+          ) {
+            battery += 10;
+          }
+        }
       } else {
         battery += matchingArts.length * artsWeight;
       }
-      if (
-        (lockedWants.has("vulnerable-stacks") || hits.has("Физика")) &&
-        hasAny(tags, PHYSICAL_APPLY)
+      if (wantsStacks && !isCrushConsumer(member) && isCrushConsumer(other) && (other.info.rarity ?? 0) >= 6) {
+        if (other.info.class === "Авангард") battery += 4;
+        else if (other.info.element === "Физика") battery += 18;
+        else battery += 2;
+      }
+      if (wantsStacks && hasAny(tags, PHYSICAL_APPLY)) {
+        if (wantsArtsInflict) {
+          battery += otherArts.length ? ((other.info.rarity ?? 0) >= 6 ? 12 : 6) : isPureStacker(other) ? 3 : 2;
+        } else if (hasArtsIdentity(member) && !isCrushConsumer(member)) {
+          battery += isArtsLiftSupport(other) ? 6 : 2;
+        } else {
+          battery += isPureStacker(other) ? 10 : 4;
+        }
+      } else if (
+        hits.has("Физика") &&
+        hasAny(tags, PHYSICAL_APPLY) &&
+        !hasArtsIdentity(member)
       ) {
         battery += isPureStacker(other) ? 10 : 4;
       }
@@ -413,49 +563,121 @@ export function scoreTeam(members: Entity[], focus: Entity[] = [], options: Scor
       for (const family of lockedConsume) {
         if (otherConsume.has(family)) battery -= 12;
       }
+      if (selfTags.has("Застывание") && tags.has("Застывание") && other.id !== member.id) {
+        battery -= 14;
+      }
+    }
+    if (wantsArtsInflict || lockedWants.has("arts-infliction")) {
+      const hasWantedInflict = providers.some((item) =>
+        wantedArts.some((tag) => artsInflictProvided(item, slotOne).includes(tag)),
+      );
+      if (wantedArts.length && !hasWantedInflict) battery -= 24;
+    }
+    const cryoOnTeam = members.filter((item) =>
+      artsInflictProvided(item, slotOne).includes("Криогенное поражение"),
+    );
+    const natureOnTeam = members.filter((item) =>
+      artsInflictProvided(item, slotOne).includes("Поражение природой"),
+    );
+    const solidifyCarry = providers.some((item) => operatorTags(item).has("Застывание") && isMainDps(item));
+    if (wantsSolidify || (comboIds.includes("arts-reaction") && solidifyCarry)) {
+      if (cryoOnTeam.some((item) => item.id !== member.id)) battery += 8;
+      if (natureOnTeam.some((item) => item.id !== member.id)) battery += 8;
+      if (
+        cryoOnTeam.length &&
+        natureOnTeam.length &&
+        (cryoOnTeam.some((item) => item.id !== member.id) || natureOnTeam.some((item) => item.id !== member.id))
+      ) {
+        battery += 16;
+      }
+      if (
+        cryoOnTeam.some(
+          (item) => item.id !== member.id && item.info.class === "Заклинатель" && (item.info.rarity ?? 0) >= 6,
+        )
+      ) {
+        battery += 12;
+      }
+    }
+    if (comboIds.includes("arts-reaction") && solidifyCarry) {
+      battery += 14;
+    }
+    if (
+      solidifyCarry &&
+      providers.some(
+        (item) =>
+          hasAny(operatorTags(item), HEAL_TAGS) &&
+          hasAny(operatorTags(item), ["Усиление крио", "Усиление природы", "Усиление искусств"]),
+      )
+    ) {
+      battery += 14;
+    }
+    if (
+      comboIds.includes("combustion") ||
+      wantedArts.includes("Поражение теплом")
+    ) {
+      const heatOthers = providers.filter((item) =>
+        artsInflictProvided(item, slotOne).includes("Поражение теплом"),
+      );
+      battery += heatOthers.length * 8;
+      if (!heatOthers.length) battery -= 10;
     }
   }
-  const slotOne = options.slotOne ?? members[0];
-  if (members.some((member) => member.id === "si") && slotOne && isMainDps(slotOne) && slotOne.id !== "si") {
+  if (
+    members.some((member) => member.id === "si") &&
+    slotOne &&
+    isMainDps(slotOne) &&
+    slotOne.id !== "si" &&
+    slotOne.info.element === "Тепло"
+  ) {
     battery += 6;
   }
   if (!(focus.length && focus.every(isEnabler))) {
     for (const other of others) {
       if (
         (lockedWants.has("electrification") || lockedWants.has("electric-infliction")) &&
-        !lockedWants.has("vulnerable-stacks") &&
-        hasAny(operatorTags(other), PHYSICAL_APPLY)
+        !comboWants.has("vulnerable-stacks") &&
+        isCrushApplier(other)
       ) {
         battery -= 14;
       }
       if (crushCore && consumeNeedsOf(other).has("electro")) battery -= 12;
       if (!isMainDps(other)) continue;
       if (isPureStacker(other)) continue;
-      if (hasAny(operatorTags(other), PHYSICAL_CONSUME)) {
+      if (isCrushConsumer(other)) {
+        const focusConsumes = focus.some(isCrushConsumer);
         if (
           crushCore &&
+          focusConsumes &&
           (other.info.rarity ?? 0) >= 6 &&
           !normalizeComboFrom(comboSkill(other)?.comboFrom).includes("ally-combo")
         ) {
-          battery -= 10;
+          battery -= 16;
+        } else if (
+          comboWants.has("vulnerable-stacks") &&
+          isMainDps(other) &&
+          hasArtsIdentity(other) &&
+          other.info.element !== "Физика"
+        ) {
+          battery -= 18;
         }
         continue;
       }
-      const helpsArts = wantedInflictTags(focus[0] ?? other, options.slotOne).some((tag) =>
-        operatorTags(other).has(tag),
+      const helpsArts = wantedInflictTags(focus[0] ?? other, slotOne).some((tag) =>
+        artsInflictProvided(other, slotOne).includes(tag),
       );
       if (crushCore && focusWantsCrush(focus)) {
         battery -= 12;
         continue;
       }
       if (helpsArts) continue;
-      battery -= 8;
+      if (wantsSolidify && (other.info.element === "Крио" || other.info.element === "Природа")) continue;
+      battery -= (other.info.rarity ?? 0) >= 6 ? 16 : 8;
     }
   }
   const unlock = focusCombo.points * 3 + focusNeeds.points * 3 + strict * 3 + battery;
   const formation = scoreFormation(members, focus).score;
   const weapons = weaponScore(members, options.weapons);
-  const archetype = detectArchetype(members, focus);
+  const archetype = detectArchetype(members, focus, slotOne);
   const archetypeBonus = archetype.id === "mixed" ? 0 : 14;
   const raritySum = members.reduce((sum, member) => sum + (member.info.rarity ?? 0), 0);
   return {
@@ -492,7 +714,7 @@ export function scoreTeam(members: Entity[], focus: Entity[] = [], options: Scor
 
 export function describeSynergy(members: Entity[], focus: Entity[] = [], options: ScoreOptions = {}): string[] {
   const why: string[] = [];
-  const archetype = detectArchetype(members, focus);
+  const archetype = detectArchetype(members, focus, options.slotOne);
   why.push(`Архетип: ${archetype.label}.`);
   if (options.slotOne) {
     const heatDps = members.find((item) => item.info.element === "Тепло" && isMainDps(item) && item.id !== "si");
