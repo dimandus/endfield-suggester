@@ -2,7 +2,7 @@
   "class": "Защитник",
   "element": "Тепло",
   "name": "Эмбер",
-  "owned": true,
+  "owned": false,
   "rarity": 6,
   "skills": [
     {

@@ -1,5 +1,6 @@
 import {
   displayName,
+  ELEMENTS,
   hitsDivergeFromCanon,
   isOwned,
   operatorHitElements,
@@ -40,6 +41,52 @@ export const TEAM_SLOTS: { id: TeamSlotId; label: string }[] = [
 export const ROLE_SLOTS = TEAM_SLOTS;
 
 export type TeamArchetypeId = "crush" | "electric" | "heat" | "nature" | "cryo" | "mixed";
+
+export type ElementFilterId = "any" | "rainbow" | (typeof ELEMENTS)[number];
+export type PlaystyleId = "any" | "burst" | "steady" | "survive";
+
+export type TeamQuery = {
+  element?: ElementFilterId;
+  playstyle?: PlaystyleId;
+};
+
+export type Playstyle = {
+  id: Exclude<PlaystyleId, "any">;
+  label: string;
+};
+
+export const ELEMENT_FILTERS: { id: ElementFilterId; label: string; hint: string }[] = [
+  { id: "any", label: "Любая стихия", hint: "Без ограничения по табличке стихии" },
+  { id: "rainbow", label: "Все стихии разные", hint: "Четыре разные стихии — на режим, где одинаковые копят сопротивление" },
+  { id: "Физика", label: "Физика", hint: "Разгром / прорыв и физические керри" },
+  { id: "Тепло", label: "Тепло", hint: "Горение и тепловое ядро" },
+  { id: "Электро", label: "Электро", hint: "Электризация и электро-керри" },
+  { id: "Природа", label: "Природа", hint: "Коррозия и природное ядро" },
+  { id: "Крио", label: "Крио", hint: "Застывание и крио-ядро" },
+  { id: "Эфир", label: "Эфир", hint: "Оперативники со стихией эфир" },
+];
+
+export const PLAYSTYLE_FILTERS: { id: PlaystyleId; label: string; hint: string }[] = [
+  { id: "any", label: "Любой стиль", hint: "Не фильтровать по ульте и выживанию" },
+  { id: "burst", label: "От ульты", hint: "Сильный дорогой супернавык, урон собран в окне ульты" },
+  { id: "steady", label: "Стабильный урон", hint: "Петля боевых и комбо, ульта не обязательна" },
+  { id: "survive", label: "Урон и выживаемость", hint: "Лечение или щит, при этом есть чем бить" },
+];
+
+const ARCH_BY_ELEMENT: Partial<Record<(typeof ELEMENTS)[number], TeamArchetypeId>> = {
+  Физика: "crush",
+  Тепло: "heat",
+  Электро: "electric",
+  Природа: "nature",
+  Крио: "cryo",
+};
+
+const INFLICT_BY_ELEMENT: Partial<Record<(typeof ELEMENTS)[number], string>> = {
+  Тепло: "Поражение теплом",
+  Электро: "Поражение электричеством",
+  Природа: "Поражение природой",
+  Крио: "Криогенное поражение",
+};
 
 export type TeamArchetype = {
   id: TeamArchetypeId;
@@ -89,6 +136,7 @@ export type TeamSuggestion = {
   slotHint?: string;
   score: TeamScore;
   archetype: TeamArchetype;
+  playstyle: Playstyle;
 };
 
 export function roleSlotId(_className?: string): TeamSlotId | null {
@@ -304,6 +352,96 @@ export function detectArchetype(
     return { id: "mixed", label: "Смешанный состав" };
   }
   return { id: best.id, label: best.label };
+}
+
+export function parseUltCost(entity: Entity) {
+  const text = entity.info.skills?.[3]?.description ?? "";
+  const match = text.match(/суперэнерг[^\d]{0,16}(\d+)/i);
+  return match ? Number(match[1]) : 0;
+}
+
+function ultTakesField(entity: Entity) {
+  return /управляемым оперативником/i.test(entity.info.skills?.[3]?.description ?? "");
+}
+
+export function playstyleScores(members: Entity[]) {
+  const carries = members.filter(isMainDps);
+  const carryUlt = Math.max(0, ...carries.map(parseUltCost));
+  const healers = members.filter(
+    (member) => hasAny(operatorTags(member), HEAL_TAGS) || member.info.class === "Защитник",
+  );
+  const sp = members.some(isSpBattery);
+  const comboLoop = members.filter((member) => {
+    const from = comboWantsOf(member);
+    return from.some((id) => id !== "final-strike" && id !== "ally-pressure" && id !== "ally-combo");
+  }).length;
+  const burst =
+    (carryUlt >= 180 ? 3 : carryUlt >= 140 ? 1 : 0) + (carries.some(ultTakesField) ? 1 : 0);
+  const steady =
+    (sp ? 1 : 0) +
+    (comboLoop >= 2 ? 2 : comboLoop ? 1 : 0) +
+    (carryUlt > 0 && carryUlt < 160 ? 1 : 0);
+  const survive = !carries.length
+    ? 0
+    : (healers.length ? 2 : 0) +
+      (healers.length >= 2 ? 1 : 0) +
+      (members.some((member) => operatorTags(member).has("Щит")) ? 1 : 0);
+  return { burst, steady, survive, carryUlt };
+}
+
+export function detectPlaystyle(members: Entity[]): Playstyle {
+  const scores = playstyleScores(members);
+  const ranked: Playstyle[] = [
+    { id: "burst", label: "От ульты" },
+    { id: "steady", label: "Стабильный урон" },
+    { id: "survive", label: "Урон и выживаемость" },
+  ];
+  ranked.sort((a, b) => scores[b.id] - scores[a.id]);
+  const best = ranked[0];
+  if (!best || scores[best.id] < 2) return { id: "steady", label: "Стабильный урон" };
+  return best;
+}
+
+export function queryIsActive(query: TeamQuery = {}) {
+  return Boolean(
+    (query.element && query.element !== "any") || (query.playstyle && query.playstyle !== "any"),
+  );
+}
+
+export function teamMatchesQuery(
+  members: Entity[],
+  query: TeamQuery = {},
+  slotOne?: Entity | null,
+): boolean {
+  const element = query.element ?? "any";
+  const playstyle = query.playstyle ?? "any";
+  if (element === "rainbow") {
+    const elements = members.map((member) => member.info.element).filter(Boolean);
+    if (elements.length !== 4 || new Set(elements).size !== 4) return false;
+  } else if (element !== "any") {
+    const wantedArch = ARCH_BY_ELEMENT[element];
+    const arch = detectArchetype(members, [], slotOne);
+    const inflict = INFLICT_BY_ELEMENT[element];
+    const ofElement = members.filter((member) => member.info.element === element).length;
+    const ofInflict = inflict
+      ? members.filter((member) => artsInflictProvided(member, slotOne).includes(inflict)).length
+      : 0;
+    const ofHits = members.filter((member) => operatorHitElements(member).includes(element)).length;
+    if (wantedArch && arch.id === wantedArch) {
+      // ok
+    } else if (element === "Эфир") {
+      if (ofElement < 1) return false;
+    } else if (ofElement + ofInflict + ofHits < 2) {
+      return false;
+    }
+  }
+  if (playstyle !== "any") {
+    const scores = playstyleScores(members);
+    if (playstyle === "burst" && scores.burst < 2 && scores.carryUlt < 180) return false;
+    if (playstyle === "steady" && scores.steady < 2) return false;
+    if (playstyle === "survive" && scores.survive < 2) return false;
+  }
+  return members.filter(Boolean).length === 4;
 }
 
 function weaponScore(members: Entity[], weapons: Entity[] = []) {
@@ -990,7 +1128,16 @@ function packSuggestion(
     slotHint: rotation.hint,
     score,
     archetype: score.archetype,
+    playstyle: detectPlaystyle(members),
   };
+}
+
+function keepSuggestion(
+  suggestion: TeamSuggestion,
+  query: TeamQuery,
+): boolean {
+  if (!queryIsActive(query)) return true;
+  return teamMatchesQuery(suggestion.members, query, suggestion.slots[0]?.operator ?? null);
 }
 
 export function suggestCompletions(
@@ -999,6 +1146,7 @@ export function suggestCompletions(
   limit = 4,
   weapons: Entity[] = [],
   excludedIds: string[] = [],
+  query: TeamQuery = {},
 ): TeamSuggestion[] {
   const locked = TEAM_SLOTS.map((slot) => lockedBySlot[slot.id]).filter(
     (item): item is Entity => Boolean(item),
@@ -1015,12 +1163,14 @@ export function suggestCompletions(
   for (const extras of pickSets) {
     const slots = assignSlots(lockedBySlot, extras);
     const suggestion = packSuggestion(locked, slots, weapons);
+    if (!keepSuggestion(suggestion, query)) continue;
     const key = teamKey(suggestion.members);
     const current = unique.get(key);
     if (!current || compareSuggestions(suggestion, current) < 0) unique.set(key, suggestion);
   }
 
   if (!unique.size) {
+    if (queryIsActive(query)) return [];
     const slots = assignSlots(lockedBySlot, []);
     return [packSuggestion(locked, slots, weapons)];
   }
@@ -1039,6 +1189,99 @@ export function suggestCompletions(
     if (!picked.includes(suggestion)) picked.push(suggestion);
   }
   return picked;
+}
+
+function cartesian<T>(lists: T[][]): T[][] {
+  return lists.reduce((acc, list) => acc.flatMap((prefix) => list.map((item) => [...prefix, item])), [
+    [],
+  ] as T[][]);
+}
+
+function pickFilterSeed(roster: Entity[], query: TeamQuery, excludedIds: string[]): Entity | null {
+  const banned = new Set(excludedIds);
+  const pool = roster.filter((item) => !banned.has(item.id));
+  const element = query.element ?? "any";
+  let candidates = pool.filter(isMainDps);
+  if (element !== "any" && element !== "rainbow") {
+    const ofEl = pool.filter((item) => item.info.element === element);
+    candidates = ofEl.filter(isMainDps);
+    if (!candidates.length) candidates = ofEl;
+  }
+  if (query.playstyle === "burst") {
+    candidates = [...candidates].sort(
+      (a, b) => parseUltCost(b) - parseUltCost(a) || (b.info.rarity ?? 0) - (a.info.rarity ?? 0),
+    );
+  } else if (query.playstyle === "survive") {
+    candidates = [...candidates].sort((a, b) => (b.info.rarity ?? 0) - (a.info.rarity ?? 0));
+  } else {
+    candidates = [...candidates].sort(
+      (a, b) => (b.info.rarity ?? 0) - (a.info.rarity ?? 0) || parseUltCost(b) - parseUltCost(a),
+    );
+  }
+  return candidates[0] ?? null;
+}
+
+function suggestRainbowTeams(
+  roster: Entity[],
+  excludedIds: string[],
+  weapons: Entity[],
+  query: TeamQuery,
+  limit: number,
+): TeamSuggestion[] {
+  const banned = new Set(excludedIds);
+  const pool = roster.filter((item) => !banned.has(item.id));
+  const byElement = new Map<string, Entity[]>();
+  for (const element of ELEMENTS) {
+    const list = pool
+      .filter((item) => item.info.element === element)
+      .sort((a, b) => {
+        const dps = Number(isMainDps(b)) - Number(isMainDps(a));
+        if (dps) return dps;
+        return (b.info.rarity ?? 0) - (a.info.rarity ?? 0);
+      });
+    if (list.length) byElement.set(element, list.slice(0, 2));
+  }
+  const available = [...byElement.keys()];
+  if (available.length < 4) return [];
+  const unique = new Map<string, TeamSuggestion>();
+  for (const four of combinations(available, 4)) {
+    const lists = four.map((element) => byElement.get(element) ?? []);
+    for (const members of cartesian(lists)) {
+      if (new Set(members.map((item) => item.id)).size !== 4) continue;
+      if (!teamMatchesQuery(members, query, members.find(isMainDps) ?? members[0])) continue;
+      const seed = members.find(isMainDps) ?? members[0];
+      const extras = members.filter((item) => item.id !== seed.id);
+      const slots = assignSlots({ "slot-0": seed }, extras);
+      const suggestion = packSuggestion([seed], slots, weapons);
+      const key = teamKey(suggestion.members);
+      const current = unique.get(key);
+      if (!current || compareSuggestions(suggestion, current) < 0) unique.set(key, suggestion);
+    }
+  }
+  return [...unique.values()].sort(compareSuggestions).slice(0, limit);
+}
+
+export function suggestTeams(
+  operators: Entity[],
+  lockedBySlot: LockedSlots,
+  limit = 5,
+  weapons: Entity[] = [],
+  excludedIds: string[] = [],
+  query: TeamQuery = {},
+): TeamSuggestion[] {
+  const locked = TEAM_SLOTS.map((slot) => lockedBySlot[slot.id]).filter(
+    (item): item is Entity => Boolean(item),
+  );
+  if (locked.length) {
+    return suggestCompletions(operators, lockedBySlot, limit, weapons, excludedIds, query);
+  }
+  if (!queryIsActive(query)) return [];
+  if (query.element === "rainbow") {
+    return suggestRainbowTeams(operators, excludedIds, weapons, query, limit);
+  }
+  const seed = pickFilterSeed(operators, query, excludedIds);
+  if (!seed) return [];
+  return suggestCompletions(operators, { "slot-0": seed }, limit, weapons, excludedIds, query);
 }
 
 export function completeTeam(operators: Entity[], lockedBySlot: LockedSlots): TeamSuggestion | null {

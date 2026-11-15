@@ -3,9 +3,15 @@ import { displayName, isOwned, operatorElementLine, rankLabel } from "./catalog"
 import { evaluateCombo } from "./combo";
 import Portrait from "./Portrait";
 import {
+  ELEMENT_FILTERS,
+  PLAYSTYLE_FILTERS,
   TEAM_SLOTS,
-  suggestCompletions,
+  queryIsActive,
+  suggestTeams,
+  type ElementFilterId,
+  type PlaystyleId,
   type RoleSlotId,
+  type TeamQuery,
   type TeamSuggestion,
 } from "./team";
 import type { Entity } from "./types";
@@ -17,10 +23,12 @@ type Props = {
 
 type SlotDef = (typeof TEAM_SLOTS)[number];
 
-function scoreLine(score: TeamSuggestion["score"]) {
+function scoreLine(suggestion: TeamSuggestion) {
+  const score = suggestion.score;
   return (
     <>
       {score.archetype.label}
+      {` · ${suggestion.playstyle.label}`}
       {` · очки ${score.total} · состав ${score.formation}`}
       {score.focusComboTotal
         ? ` · раскрыто комбо ${score.focusComboReady}/${score.focusComboTotal}`
@@ -200,20 +208,53 @@ function SynergyBlock({ suggestion }: { suggestion: TeamSuggestion }) {
   );
 }
 
+function FilterRow({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  options: { id: string; label: string; hint: string }[];
+  value: string;
+  onChange: (id: string) => void;
+}) {
+  return (
+    <div className="filter-row">
+      <p className="eyebrow">{label}</p>
+      <div className="filter-chips">
+        {options.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            className={value === option.id ? "active" : "ghost"}
+            title={option.hint}
+            onClick={() => onChange(option.id)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function TeamCard({
   suggestion,
   featured,
+  browsing,
   onLock,
   onTakeAll,
   onExclude,
 }: {
   suggestion: TeamSuggestion;
   featured?: boolean;
+  browsing?: boolean;
   onLock: (slotId: RoleSlotId, operator: Entity) => void;
   onTakeAll: () => void;
   onExclude: (operator: Entity) => void;
 }) {
-  const lockedIds = new Set(suggestion.locked.map((item) => item.id));
+  const lockedIds = browsing ? new Set<string>() : new Set(suggestion.locked.map((item) => item.id));
   const hasProposed = suggestion.slots.some(
     (item) => item.operator && !lockedIds.has(item.operator.id),
   );
@@ -225,16 +266,24 @@ function TeamCard({
           <p className="eyebrow">
             {suggestion.archetype.label}
             {" · "}
-            {suggestion.locked.length === 4
-              ? "Ваш состав"
-              : featured
-                ? "Лучший добор"
-                : "Ещё состав"}
+            {suggestion.playstyle.label}
+            {" · "}
+            {browsing
+              ? featured
+                ? "Пример пачки"
+                : "Ещё пример"
+              : suggestion.locked.length === 4
+                ? "Ваш состав"
+                : featured
+                  ? "Лучший добор"
+                  : "Ещё состав"}
           </p>
           <h3>
-            {hasProposed
-              ? `К ${suggestion.locked.map(displayName).join(" · ")}`
-              : suggestion.locked.map(displayName).join(" · ")}
+            {browsing
+              ? suggestion.members.map(displayName).join(" · ")
+              : hasProposed
+                ? `К ${suggestion.locked.map(displayName).join(" · ")}`
+                : suggestion.locked.map(displayName).join(" · ")}
           </h3>
         </div>
         <div className="team-card-actions">
@@ -243,7 +292,7 @@ function TeamCard({
               Взять всю пачку
             </button>
           ) : null}
-          <p className="muted">{scoreLine(suggestion.score)}</p>
+          <p className="muted">{scoreLine(suggestion)}</p>
         </div>
       </div>
       <div className="slots">
@@ -277,8 +326,15 @@ export default function Teams({ operators, weapons = [] }: Props) {
   );
   const [picked, setPicked] = useState<Partial<Record<RoleSlotId, string>>>({});
   const [excluded, setExcluded] = useState<string[]>([]);
+  const [elementFilter, setElementFilter] = useState<ElementFilterId>("any");
+  const [playstyleFilter, setPlaystyleFilter] = useState<PlaystyleId>("any");
   const [openSlot, setOpenSlot] = useState<RoleSlotId | null>(null);
   const dragFrom = useRef<RoleSlotId | null>(null);
+  const query = useMemo<TeamQuery>(
+    () => ({ element: elementFilter, playstyle: playstyleFilter }),
+    [elementFilter, playstyleFilter],
+  );
+  const filtersOn = queryIsActive(query);
 
   const lockedBySlot = useMemo(() => {
     const next: Partial<Record<RoleSlotId, Entity>> = {};
@@ -296,8 +352,8 @@ export default function Teams({ operators, weapons = [] }: Props) {
   );
   const pickedCount = Object.keys(lockedBySlot).length;
   const suggestions = useMemo(
-    () => suggestCompletions(roster, lockedBySlot, 5, weapons.filter(isOwned), excluded),
-    [roster, lockedBySlot, weapons, excluded],
+    () => suggestTeams(roster, lockedBySlot, 5, weapons.filter(isOwned), excluded, query),
+    [roster, lockedBySlot, weapons, excluded, query],
   );
 
   const excludedPeople = roster.filter((item) => excluded.includes(item.id));
@@ -382,23 +438,40 @@ export default function Teams({ operators, weapons = [] }: Props) {
         <div>
           <h2>Подбор команд</h2>
           <p className="muted">
-            Перетаскивайте слоты: слот 1 задаёт стихию Си и срез комбо с её ульты. «Взять всю пачку»
-            ставит всех четверых. «Не предлагать» убирает персонажа из добора. Ниже — ротация, если
-            состав совпал с эталоном.
+            Стихия и стиль можно включить без слотов — покажутся примеры топовых пачек из наличия.
+            Фильтры сочетаются со слотами. Слот 1 задаёт стихию Си. «Все стихии разные» — на режим,
+            где одинаковая стихия копит врагу сопротивление.
           </p>
         </div>
-        {pickedCount || excluded.length ? (
+        {pickedCount || excluded.length || filtersOn ? (
           <button
             type="button"
             className="ghost"
             onClick={() => {
               setPicked({});
               setExcluded([]);
+              setElementFilter("any");
+              setPlaystyleFilter("any");
             }}
           >
-            Сбросить слоты
+            Сбросить
           </button>
         ) : null}
+      </div>
+
+      <div className="team-filters">
+        <FilterRow
+          label="Стихия пачки"
+          options={ELEMENT_FILTERS}
+          value={elementFilter}
+          onChange={(id) => setElementFilter(id as ElementFilterId)}
+        />
+        <FilterRow
+          label="Стиль пачки"
+          options={PLAYSTYLE_FILTERS}
+          value={playstyleFilter}
+          onChange={(id) => setPlaystyleFilter(id as PlaystyleId)}
+        />
       </div>
 
       <div className="slots builder-slots">
@@ -482,21 +555,33 @@ export default function Teams({ operators, weapons = [] }: Props) {
         </div>
       ) : null}
 
-      {!pickedCount ? (
+      {!pickedCount && !filtersOn ? (
         <section className="empty">
-          <p>Выберите оперативника в слоте — ниже появятся остальные трое, ротация и почему они вместе работают.</p>
+          <p>
+            Выберите оперативника в слоте или включите стихию / стиль выше — появятся пачки, ротация
+            и почему они вместе работают.
+          </p>
         </section>
-      ) : (
+      ) : suggestions.length ? (
         suggestions.map((suggestion, index) => (
           <TeamCard
             key={suggestion.members.map((member) => member.id).join("-")}
             suggestion={suggestion}
             featured={index === 0}
+            browsing={!pickedCount}
             onLock={(slotId, operator) => setSlot(slotId, operator.id)}
             onTakeAll={() => takeSuggestion(suggestion)}
             onExclude={excludeOperator}
           />
         ))
+      ) : (
+        <section className="empty">
+          <p>
+            Из текущего наличия нет пачки под эти фильтры
+            {pickedCount ? " и выбранные слоты" : ""}. Снимите стихию или стиль, либо поставьте
+            другого керри.
+          </p>
+        </section>
       )}
     </section>
   );

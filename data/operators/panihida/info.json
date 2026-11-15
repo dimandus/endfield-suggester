@@ -2,7 +2,7 @@
   "class": "Штурмовик",
   "element": "Крио",
   "name": "Панихида",
-  "owned": true,
+  "owned": false,
   "rarity": 6,
   "skills": [
     {

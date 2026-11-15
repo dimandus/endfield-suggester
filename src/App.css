@@ -497,6 +497,31 @@ h3 {
   margin: 0 0 8px;
 }
 
+.team-filters {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid #2b4b52;
+  border-radius: 14px;
+  background: rgba(10, 22, 28, 0.55);
+}
+
+.filter-row {
+  display: grid;
+  gap: 8px;
+}
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.filter-chips button {
+  width: auto;
+  padding: 8px 12px;
+}
+
 .seed-select {
   min-width: 260px;
 }
