@@ -364,6 +364,30 @@ function ultTakesField(entity: Entity) {
   return /управляемым оперативником/i.test(entity.info.skills?.[3]?.description ?? "");
 }
 
+/** Урон завязан на дорогой супер / длительное полевое окно у корня (слот 1). */
+export function isBurstCarry(entity: Entity) {
+  if (!isMainDps(entity)) return false;
+  const ult = parseUltCost(entity);
+  if (ult >= 180) return true;
+  if (ult >= 130 && ultTakesField(entity)) return true;
+  return false;
+}
+
+export function teamCarry(members: Entity[], slotOne?: Entity | null): Entity | null {
+  const hasSi = members.some((item) => item.id === "si");
+  if (slotOne) {
+    if (isMainDps(slotOne)) return slotOne;
+    if (slotOne.id === "si" && hasSi) {
+      const heatDps = members.find((item) => item.info.element === "Тепло" && isMainDps(item) && item.id !== "si");
+      if (heatDps) return heatDps;
+    }
+    return slotOne;
+  }
+  const dps = members.filter(isMainDps);
+  if (!dps.length) return members[0] ?? null;
+  return dps.reduce((best, cur) => (parseUltCost(cur) > parseUltCost(best) ? cur : best));
+}
+
 export function playstyleScores(members: Entity[]) {
   const carries = members.filter(isMainDps);
   const carryUlt = Math.max(0, ...carries.map(parseUltCost));
@@ -389,17 +413,25 @@ export function playstyleScores(members: Entity[]) {
   return { burst, steady, survive, carryUlt };
 }
 
-export function detectPlaystyle(members: Entity[]): Playstyle {
+export function detectPlaystyle(members: Entity[], slotOne?: Entity | null): Playstyle {
+  const labels: Record<Exclude<PlaystyleId, "any">, string> = {
+    burst: "От ульты",
+    steady: "Стабильный урон",
+    survive: "Урон и выживаемость",
+  };
+  const carry = teamCarry(members, slotOne);
   const scores = playstyleScores(members);
-  const ranked: Playstyle[] = [
-    { id: "burst", label: "От ульты" },
-    { id: "steady", label: "Стабильный урон" },
-    { id: "survive", label: "Урон и выживаемость" },
-  ];
-  ranked.sort((a, b) => scores[b.id] - scores[a.id]);
-  const best = ranked[0];
-  if (!best || scores[best.id] < 2) return { id: "steady", label: "Стабильный урон" };
-  return best;
+  if (carry && isMainDps(carry) && scores.survive >= 2 && !isBurstCarry(carry)) {
+    return { id: "survive", label: labels.survive };
+  }
+  if (carry && isBurstCarry(carry)) {
+    return { id: "burst", label: labels.burst };
+  }
+  if (carry && isMainDps(carry)) {
+    return { id: "steady", label: labels.steady };
+  }
+  if (scores.survive >= 2) return { id: "survive", label: labels.survive };
+  return { id: "steady", label: labels.steady };
 }
 
 export function queryIsActive(query: TeamQuery = {}) {
@@ -437,9 +469,15 @@ export function teamMatchesQuery(
   }
   if (playstyle !== "any") {
     const scores = playstyleScores(members);
-    if (playstyle === "burst" && scores.burst < 2 && scores.carryUlt < 180) return false;
-    if (playstyle === "steady" && scores.steady < 2) return false;
-    if (playstyle === "survive" && scores.survive < 2) return false;
+    const carry = teamCarry(members, slotOne);
+    if (playstyle === "burst") {
+      if (!carry || !isBurstCarry(carry)) return false;
+    } else if (playstyle === "steady") {
+      if (!carry || !isMainDps(carry) || isBurstCarry(carry)) return false;
+      if (scores.steady < 1 && !members.some(isSpBattery)) return false;
+    } else if (playstyle === "survive" && scores.survive < 2) {
+      return false;
+    }
   }
   return members.filter(Boolean).length === 4;
 }
@@ -1128,7 +1166,7 @@ function packSuggestion(
     slotHint: rotation.hint,
     score,
     archetype: score.archetype,
-    playstyle: detectPlaystyle(members),
+    playstyle: detectPlaystyle(members, slotOne),
   };
 }
 
@@ -1197,28 +1235,61 @@ function cartesian<T>(lists: T[][]): T[][] {
   ] as T[][]);
 }
 
-function pickFilterSeed(roster: Entity[], query: TeamQuery, excludedIds: string[]): Entity | null {
+function browseCarryCandidates(roster: Entity[], query: TeamQuery, excludedIds: string[]): Entity[] {
   const banned = new Set(excludedIds);
   const pool = roster.filter((item) => !banned.has(item.id));
   const element = query.element ?? "any";
+  const playstyle = query.playstyle ?? "any";
   let candidates = pool.filter(isMainDps);
   if (element !== "any" && element !== "rainbow") {
     const ofEl = pool.filter((item) => item.info.element === element);
     candidates = ofEl.filter(isMainDps);
-    if (!candidates.length) candidates = ofEl;
+    if (!candidates.length) candidates = ofEl.filter(isMainDps);
   }
-  if (query.playstyle === "burst") {
-    candidates = [...candidates].sort(
-      (a, b) => parseUltCost(b) - parseUltCost(a) || (b.info.rarity ?? 0) - (a.info.rarity ?? 0),
-    );
-  } else if (query.playstyle === "survive") {
-    candidates = [...candidates].sort((a, b) => (b.info.rarity ?? 0) - (a.info.rarity ?? 0));
-  } else {
-    candidates = [...candidates].sort(
-      (a, b) => (b.info.rarity ?? 0) - (a.info.rarity ?? 0) || parseUltCost(b) - parseUltCost(a),
-    );
+  if (playstyle === "burst") {
+    candidates = candidates.filter(isBurstCarry);
+  } else if (playstyle === "steady") {
+    candidates = candidates.filter((item) => !isBurstCarry(item));
   }
-  return candidates[0] ?? null;
+  const rankBurst = (a: Entity, b: Entity) =>
+    parseUltCost(b) - parseUltCost(a) || (b.info.rarity ?? 0) - (a.info.rarity ?? 0);
+  const rankDefault = (a: Entity, b: Entity) =>
+    (b.info.rarity ?? 0) - (a.info.rarity ?? 0) || parseUltCost(b) - parseUltCost(a);
+  if (playstyle === "burst") {
+    return [...candidates].sort(rankBurst);
+  }
+  if (playstyle === "survive") {
+    return [...candidates].sort(rankDefault);
+  }
+  return [...candidates].sort(rankDefault);
+}
+
+function suggestBrowseTeams(
+  operators: Entity[],
+  excludedIds: string[],
+  weapons: Entity[],
+  query: TeamQuery,
+  limit: number,
+): TeamSuggestion[] {
+  const seeds = browseCarryCandidates(operators, query, excludedIds);
+  const picked: TeamSuggestion[] = [];
+  const seenCores = new Set<string>();
+  const seenTeams = new Set<string>();
+  for (const seed of seeds) {
+    if (picked.length >= limit) break;
+    if (seenCores.has(seed.id)) continue;
+    const batch = suggestCompletions(operators, { "slot-0": seed }, 1, weapons, excludedIds, query);
+    const best = batch[0];
+    if (!best) continue;
+    const coreId = best.slots[0]?.operator?.id;
+    if (!coreId || seenCores.has(coreId)) continue;
+    const key = teamKey(best.members);
+    if (seenTeams.has(key)) continue;
+    seenTeams.add(key);
+    seenCores.add(coreId);
+    picked.push(best);
+  }
+  return picked.sort(compareSuggestions);
 }
 
 function suggestRainbowTeams(
@@ -1279,9 +1350,7 @@ export function suggestTeams(
   if (query.element === "rainbow") {
     return suggestRainbowTeams(operators, excludedIds, weapons, query, limit);
   }
-  const seed = pickFilterSeed(operators, query, excludedIds);
-  if (!seed) return [];
-  return suggestCompletions(operators, { "slot-0": seed }, limit, weapons, excludedIds, query);
+  return suggestBrowseTeams(operators, excludedIds, weapons, query, limit);
 }
 
 export function completeTeam(operators: Entity[], lockedBySlot: LockedSlots): TeamSuggestion | null {

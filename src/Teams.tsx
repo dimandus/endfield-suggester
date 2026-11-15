@@ -280,7 +280,13 @@ function TeamCard({
           </p>
           <h3>
             {browsing
-              ? suggestion.members.map(displayName).join(" · ")
+              ? (() => {
+                  const core = suggestion.slots[0]?.operator;
+                  const rest = suggestion.members.filter((m) => m.id !== core?.id).map(displayName);
+                  return core
+                    ? `Кор: ${displayName(core)}${rest.length ? ` · ${rest.join(" · ")}` : ""}`
+                    : suggestion.members.map(displayName).join(" · ");
+                })()
               : hasProposed
                 ? `К ${suggestion.locked.map(displayName).join(" · ")}`
                 : suggestion.locked.map(displayName).join(" · ")}
